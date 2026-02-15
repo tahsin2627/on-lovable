@@ -1,127 +1,106 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Function to sanitize smart quotes and other problematic characters
-function sanitizeQuotes(text: string): string {
+function sanitize(text: string = ''): string {
   return text
-    // Replace smart single quotes
     .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-    // Replace smart double quotes
     .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-    // Replace other quote-like characters
-    .replace(/[\u00AB\u00BB]/g, '"') // Guillemets
-    .replace(/[\u2039\u203A]/g, "'") // Single guillemets
-    // Replace other problematic characters
-    .replace(/[\u2013\u2014]/g, '-') // En dash and em dash
-    .replace(/[\u2026]/g, '...') // Ellipsis
-    .replace(/[\u00A0]/g, ' '); // Non-breaking space
+    .replace(/[\u00AB\u00BB]/g, '"')
+    .replace(/[\u2039\u203A]/g, "'")
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/[\u2026]/g, '...')
+    .replace(/[\u00A0]/g, ' ');
 }
 
 export async function POST(request: NextRequest) {
   try {
     const { url } = await request.json();
-    
+
     if (!url) {
-      return NextResponse.json({
-        success: false,
-        error: 'URL is required'
-      }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: 'URL is required' },
+        { status: 400 }
+      );
     }
-    
-    console.log('[scrape-url-enhanced] Scraping with Firecrawl:', url);
-    
+
     const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY;
+
     if (!FIRECRAWL_API_KEY) {
-      throw new Error('FIRECRAWL_API_KEY environment variable is not set');
+      return NextResponse.json(
+        { success: false, error: 'FIRECRAWL_API_KEY not set' },
+        { status: 500 }
+      );
     }
-    
-    // Make request to Firecrawl API with maxAge for 500% faster scraping
-    const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
+
+    console.log('[scrape-url-enhanced] Scraping:', url);
+
+    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${FIRECRAWL_API_KEY}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         url,
-        formats: ['markdown', 'html', 'screenshot'],
-        waitFor: 3000,
-        timeout: 30000,
+        formats: ['markdown'],
+        timeout: 60000,          // 60 seconds
+        waitFor: 5000,           // wait for JS render
+        render_js: true,         // allow JS rendering
         blockAds: true,
-        maxAge: 3600000, // Use cached data if less than 1 hour old (500% faster!)
-        actions: [
-          {
-            type: 'wait',
-            milliseconds: 2000
-          },
-          {
-            type: 'screenshot',
-            fullPage: false // Just visible viewport for performance
-          }
-        ]
-      })
+        maxAge: 3600000          // 1 hour cache
+      }),
     });
-    
-    if (!firecrawlResponse.ok) {
-      const error = await firecrawlResponse.text();
-      throw new Error(`Firecrawl API error: ${error}`);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[Firecrawl error]', errorText);
+      return NextResponse.json(
+        { success: false, error: 'Scrape failed', details: errorText },
+        { status: 500 }
+      );
     }
-    
-    const data = await firecrawlResponse.json();
-    
-    if (!data.success || !data.data) {
-      throw new Error('Failed to scrape content');
+
+    const result = await response.json();
+
+    if (!result?.success || !result?.data) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid scrape response' },
+        { status: 500 }
+      );
     }
-    
-    const { markdown, metadata, screenshot, actions } = data.data;
-    // html available but not used in current implementation
-    
-    // Get screenshot from either direct field or actions result
-    const screenshotUrl = screenshot || actions?.screenshots?.[0] || null;
-    
-    // Sanitize the markdown content
-    const sanitizedMarkdown = sanitizeQuotes(markdown || '');
-    
-    // Extract structured data from the response
-    const title = metadata?.title || '';
-    const description = metadata?.description || '';
-    
-    // Format content for AI
+
+    const markdown = sanitize(result.data.markdown || '');
+    const metadata = result.data.metadata || {};
+
     const formattedContent = `
-Title: ${sanitizeQuotes(title)}
-Description: ${sanitizeQuotes(description)}
+Title: ${sanitize(metadata.title || '')}
+Description: ${sanitize(metadata.description || '')}
 URL: ${url}
 
-Main Content:
-${sanitizedMarkdown}
+Content:
+${markdown}
     `.trim();
-    
+
     return NextResponse.json({
       success: true,
-      url,
       content: formattedContent,
-      screenshot: screenshotUrl,
       structured: {
-        title: sanitizeQuotes(title),
-        description: sanitizeQuotes(description),
-        content: sanitizedMarkdown,
+        title: sanitize(metadata.title || ''),
+        description: sanitize(metadata.description || ''),
+        content: markdown,
         url,
-        screenshot: screenshotUrl
       },
       metadata: {
-        scraper: 'firecrawl-enhanced',
         timestamp: new Date().toISOString(),
+        cached: result.data.cached || false,
         contentLength: formattedContent.length,
-        cached: data.data.cached || false, // Indicates if data came from cache
-        ...metadata
       },
-      message: 'URL scraped successfully with Firecrawl (with caching for 500% faster performance)'
     });
-    
-  } catch (error) {
-    console.error('[scrape-url-enhanced] Error:', error);
-    return NextResponse.json({
-      success: false,
-      error: (error as Error).message
-    }, { status: 500 });
+
+  } catch (error: any) {
+    console.error('[scrape-url-enhanced] Fatal Error:', error);
+    return NextResponse.json(
+      { success: false, error: error.message || 'Unknown error' },
+      { status: 500 }
+    );
   }
 }
